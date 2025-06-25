@@ -1,0 +1,143 @@
+# Your Existing Task (e.g., in a 'Generate Alert Variables' step)
+- task: SomeScriptTask@1 # Could be AzureCLI@2, Bash@3, PowerShell@2, etc.
+  displayName: 'Set Existing Alert Variables'
+  inputs:
+    script: |
+      # This part remains EXACTLY as it is in your current pipeline
+      echo "##vso[task.setvariable variable=AlertRuleName]$(AlertRuleName-QR-AZURE-$(env)-DIGITAL-${{ upper(parameters.podname) }}-${{ alert.AlertRuleName }})"
+      echo "##vso[task.setvariable variable=appname]$(appname)"
+      echo "##vso[task.setvariable variable=frequencyInMinutes]${{ alert.frequencyInMinutes }}"
+      echo "##vso[task.setvariable variable=timeWindowInMinutes]${{ alert.timeWindowInMinutes }}"
+      echo "##vso[task.setvariable variable=severity]${{ alert.severity }}"
+      echo "##vso[task.setvariable variable=operator]${{ alert.operator }}"
+      echo "##vso[task.setvariable variable=threshold]${{ alert.threshold }}"
+      echo "##vso[task.setvariable variable=autoMitigate]${{ alert.autoMitigate }}"
+      echo "##vso[task.setvariable variable=enableOnlyInActiveRegion]${{ alert.enableOnlyInActiveRegion }}"
+      echo "##vso[task.setvariable variable=dev_enabled]${{ alert.enabled }}" # Renamed 'devEnabled' to 'dev_enabled' to avoid conflict if you had 'enabled' already
+
+      # Your existing variable setting for 'enableOnlyInActiveRegion'
+      # enableOnlyInActiveRegion=$(enableOnlyInActiveRegion) # This line might be removed if alert.enableOnlyInActiveRegion is directly passed.
+      # if [ -z "$enableOnlyInActiveRegion" ]; then
+      #   enableOnlyInActiveRegion="False"
+      # fi
+      # echo "##vso[task.setvariable variable=enableOnlyInActiveRegion]$enableOnlyInActiveRegion"
+
+      # ... any other existing variables set # azure-pipelines.yml
+name: Admin-Orchestrated-Alert-Management
+
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest' # Or your 'YourRedHatAgentPoolName'
+
+variables:
+- group: DR-Configuration # Link the admin-managed variable group with ActiveRegion
+
+steps:
+# --- YOUR EXISTING "Generate Alert Variables" Task (KEEP AS IS) ---
+- task: SomeScriptTask@1 # This should be the type of task you currently use (e.g., Bash@3, AzureCLI@2)
+  displayName: 'Existing: Generate Alert Variables'
+  inputs:
+    script: |
+      # DO NOT CHANGE ANYTHING IN THIS BLOCK. IT MUST REMAIN IDENTICAL TO YOUR CURRENT SETUP.
+      # It ensures AlertRuleName and all other pre-existing variables are set as before.
+      echo "##vso[task.setvariable variable=AlertRuleName]$(AlertRuleName-QR-AZURE-$(env)-DIGITAL-${{ upper(parameters.podname) }}-${{ alert.AlertRuleName }})"
+      echo "##vso[task.setvariable variable=appname]$(appname)"
+      echo "##vso[task.setvariable variable=frequencyInMinutes]${{ alert.frequencyInMinutes }}"
+      echo "##vso[task.setvariable variable=timeWindowInMinutes]${{ alert.timeWindowInMinutes }}"
+      echo "##vso[task.setvariable variable=severity]${{ alert.severity }}"
+      echo "##vso[task.setvariable variable=operator]${{ alert.operator }}"
+      echo "##vso[task.setvariable variable=threshold]${{ alert.threshold }}"
+      echo "##vso[task.setvariable variable=autoMitigate]${{ alert.autoMitigate }}"
+      echo "##vso[task.setvariable variable=enableOnlyInActiveRegion]${{ alert.enableOnlyInActiveRegion }}"
+      echo "##vso[task.setvariable variable=dev_enabled]${{ alert.enabled }}" # Assuming 'alert.enabled' is the developer's desired default for 'enabled'
+
+      # ... any other existing echo "##vso[task.setvariable ...]" commands
+
+# --- NEW TASK: Calculate Final Alert Enabled State (Inserted after existing variable setup) ---
+- task: Bash@3 # Or AzureCLI@2 if you prefer
+  displayName: 'Calculate Final Alert Enabled State'
+  inputs:
+    script: |
+      # Variables set in the previous task (or higher scope) are now available as pipeline variables.
+
+      # Get the admin-defined active region
+      ADMIN_ACTIVE_REGION="$(ActiveRegion)"
+      echo "Admin-defined active region: $ADMIN_ACTIVE_REGION"
+
+      # Get developer's flags (which are now pipeline variables from the previous step)
+      DEV_ENABLE_ONLY_ACTIVE_REGION="$(enableOnlyInActiveRegion)"
+      DEV_DEFAULT_ENABLED="$(dev_enabled)" # Use the variable where developer's 'enabled' is stored
+
+      # Get the full AlertRuleName (which is a pipeline variable from the previous step)
+      CURRENT_ALERT_NAME="$(AlertRuleName)"
+      ALERT_NAME_LOWERCASE=$(echo "$CURRENT_ALERT_NAME" | tr '[:upper:]' '[:lower:]')
+
+      DERIVED_ALERT_PRIMARY_REGION=""
+      if [[ "$ALERT_NAME_LOWERCASE" == *weu* ]]; then
+          DERIVED_ALERT_PRIMARY_REGION="WEU"
+      elif [[ "$ALERT_NAME_LOWERCASE" == *neu* ]]; then
+          DERIVED_ALERT_PRIMARY_REGION="NEU"
+      fi
+      echo "Derived primary region for alert '$CURRENT_ALERT_NAME': $DERIVED_ALERT_PRIMARY_REGION"
+
+      # Determine the FINAL 'enabled' state for the ARM template
+      FINAL_ENABLED_STATE="true" # Default in case no conditions apply
+
+      if [[ "$DEV_ENABLE_ONLY_ACTIVE_REGION" == "true" && -n "$DERIVED_ALERT_PRIMARY_REGION" ]]; then
+          # This is a region-specific alert (developer flag is true and region could be derived)
+          if [[ "$DERIVED_ALERT_PRIMARY_REGION" == "$ADMIN_ACTIVE_REGION" ]]; then
+              FINAL_ENABLED_STATE="true" # Enable if it's the active region
+          else
+              FINAL_ENABLED_STATE="false" # Disable if it's the passive region
+          fi
+      else
+          # This alert is NOT explicitly flagged as region-specific by the developer,
+          # OR its region couldn't be derived from the name.
+          # In these cases, respect the developer's default 'enabled' state.
+          if [[ "$DEV_DEFAULT_ENABLED" == "false" ]]; then
+              FINAL_ENABLED_STATE="false"
+          else
+              FINAL_ENABLED_STATE="true" # Default to true if developer didn't specify false
+          fi
+      fi
+
+      echo "Final calculated enabled state: $FINAL_ENABLED_STATE"
+      # Set a NEW pipeline variable for the final calculated 'enabled' state
+      echo "##vso[task.setvariable variable=final_alert_enabled_state]$FINAL_ENABLED_STATE"
+
+# --- Your Existing Deployment Task (or a new one that uses the calculated state) ---
+- task: AzureCLI@2
+  displayName: 'Deploy Alert Rule'
+  inputs:
+    azureSubscription: 'Your Azure Service Connection'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      RESOURCE_GROUP="your-alert-resource-group"
+      TEMPLATE_FILE="path/to/your/alert-template.json" # Adjust path
+
+      # Use the existing variables and the new calculated one
+      echo "Deploying alert $(AlertRuleName) with final enabled state $(final_alert_enabled_state)"
+
+      az deployment group create \
+        --resource-group "$RESOURCE_GROUP" \
+        --template-file "$TEMPLATE_FILE" \
+        --parameters \
+          alertRuleName="$(AlertRuleName)" \
+          alertRuleLocation="$(AlertRuleLocation)" \ # Assuming this is also an existing variable
+          enableOnlyInActiveRegion="$(enableOnlyInActiveRegion)" \ # Pass developer's original flag if template needs it
+          # THIS IS THE CRITICAL CHANGE: Pass the newly calculated variable to the ARM template
+          enabled="$(final_alert_enabled_state)" \
+          # Other parameters you are currently passing:
+          appname="$(appname)" \
+          frequencyInMinutes="$(frequencyInMinutes)" \
+          timeWindowInMinutes="$(timeWindowInMinutes)" \
+          severity="$(severity)" \
+          operator="$(operator)" \
+          threshold="$(threshold)" \
+          autoMitigate="$(autoMitigate)" \
+          dev_enabled="$(dev_enabled)" \
+          --output none
+
+
